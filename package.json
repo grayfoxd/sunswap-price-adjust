@@ -1,0 +1,27 @@
+{
+  "name": "sunswap-price-adjust",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SunSwap V3/V4 price adjustment dApp on TRON",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "antd": "^5.20.0",
+    "buffer": "^6.0.3",
+    "decimal.js": "^10.4.3",
+    "process": "^0.11.10",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "tronweb": "^6.0.0",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0"
+  }
+}

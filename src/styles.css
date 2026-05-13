@@ -1,0 +1,19 @@
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.app-container {
+  min-height: 100vh;
+  background: #fafafa;
+}
+
+.value-mono {
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  word-break: break-all;
+}
+
+.tag-disabled {
+  opacity: 0.5;
+}
