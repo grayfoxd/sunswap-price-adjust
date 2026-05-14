@@ -3,13 +3,14 @@
 // V4：本地估算 + Quoter 给参考（实际 swap 执行涉及 UniversalRouter+Permit2，标"预览模式"）
 
 import React, { useEffect, useRef, useState } from 'react'
-import { Alert, Button, Card, Descriptions, Divider, Form, Input, message, Space, Tag, Modal, InputNumber } from 'antd'
+import { Alert, Button, Card, Descriptions, Divider, Form, Input, message, Space, Tag, Modal, InputNumber, Select } from 'antd'
+import Decimal from 'decimal.js'
 import PoolSelector from '../components/PoolSelector.jsx'
 import PoolStateCard from '../components/PoolStateCard.jsx'
 import { useStore } from '../state/store'
 import { humanPriceToSqrtPriceX96, sqrtPriceX96ToHumanPrice } from '../math/sqrtPrice'
 import { planV3PushPrice, planV4PushPrice } from '../services/pushPrice'
-import { getTokenDecimals, getV4Slot0, getV4Liquidity, isNativeTrxAddress } from '../services/v4/pool'
+import { getTokenDecimals, getV4Slot0, getV4Liquidity, isNativeTrxAddress, sortPoolKey } from '../services/v4/pool'
 import { getV3PoolAddress, getV3Slot0, getV3Liquidity, getV3PoolMeta } from '../services/v3/pool'
 import { ensurePermit2Approvals } from '../services/permit2'
 import { v3SwapExactInViaRouter, v4SwapExactInViaRouter } from '../services/router'
@@ -17,7 +18,11 @@ import { toEvmHex, fromEvmHex } from '../lib/addr'
 import { getNetwork } from '../config/networks'
 import { findToken } from '../config/tokens'
 import erc20Abi from '../config/abis/erc20.json'
-import { callRead } from '../lib/contract'
+import { callRead, assertWalletMatchesNetwork } from '../lib/contract'
+
+function humanToRaw(human, dec) {
+  return BigInt(new Decimal(human).mul(new Decimal(10).pow(dec)).floor().toFixed(0))
+}
 
 async function resolveSymbol(networkKey, base58Address) {
   if (isNativeTrxAddress(base58Address)) return 'TRX'
@@ -68,6 +73,21 @@ export default function PushPrice() {
   const [slippageBps, setSlippageBps] = useState(100)
   const [err, setErr] = useState('')
 
+  // 强制兑换 (force swap) —— 用于 currentTick 在 MIN/MAX 边界或目标价估算失败的场景
+  const [forceTokenIn, setForceTokenIn] = useState('')
+  const [forceAmountIn, setForceAmountIn] = useState('')
+  const [forceMinOut, setForceMinOut] = useState('')
+  const [forceLoading, setForceLoading] = useState(false)
+  const [forceErr, setForceErr] = useState('')
+
+  // 当池子切换（canonical token0/token1 变化）时清空 force swap 表单
+  useEffect(() => {
+    setForceTokenIn('')
+    setForceAmountIn('')
+    setForceMinOut('')
+    setForceErr('')
+  }, [current?.token0, current?.token1, current?.kind])
+
   const net = getNetwork(network)
   // 所有 swap 走 UniversalRouter；V3 还需 QUOTER 做 amountIn 校准
   const swapEnabled = !!net.v4.UNIVERSAL_ROUTER && !!net.v4.PERMIT2
@@ -98,10 +118,10 @@ export default function PushPrice() {
           getV3Liquidity(network, poolAddr),
           getV3PoolMeta(network, poolAddr),
         ])
-        let d0, d1, sym0, sym1
+        let d0, d1, sym0, sym1, t0b, t1b
         if (meta?.token0 && meta?.token1) {
-          const t0b = fromEvmHex(meta.token0, network)
-          const t1b = fromEvmHex(meta.token1, network)
+          t0b = fromEvmHex(meta.token0, network)
+          t1b = fromEvmHex(meta.token1, network)
           ;[d0, d1, sym0, sym1] = await Promise.all([
             getTokenDecimals(network, t0b),
             getTokenDecimals(network, t1b),
@@ -116,6 +136,7 @@ export default function PushPrice() {
         setCurrent({
           kind: 'v3',
           poolAddress: poolAddr,
+          token0: t0b, token1: t1b,
           sqrtPriceX96: slot0.sqrtPriceX96,
           tick: slot0.tick,
           liquidity: Object.values(liq)[0],
@@ -155,25 +176,32 @@ export default function PushPrice() {
           fee: p.fee,
           tickSpacing: p.tickSpacing,
         }
+        // 按 V4 canonical 字节序排序，确保 dec0/symbol0 与 sortedPoolKey.currency0 对齐
+        const sortedKey = sortPoolKey(poolKey, network)
+        const canonToken0 = sortedKey.currency0
+        const canonToken1 = sortedKey.currency1
         const [slot0, liq, d0, d1, sym0, sym1] = await Promise.all([
           getV4Slot0(network, poolKey),
           getV4Liquidity(network, poolKey),
-          getTokenDecimals(network, p.token0),
-          getTokenDecimals(network, p.token1),
-          resolveSymbol(network, p.token0),
-          resolveSymbol(network, p.token1),
+          getTokenDecimals(network, canonToken0),
+          getTokenDecimals(network, canonToken1),
+          resolveSymbol(network, canonToken0),
+          resolveSymbol(network, canonToken1),
         ])
         setDec0(d0); setDec1(d1)
         const humanPrice = sqrtPriceX96ToHumanPrice(slot0.sqrtPriceX96, d0, d1).toSignificantDigits(18).toString()
         setCurrent({
           kind: 'v4',
           poolId: slot0.poolId,
+          token0: canonToken0, token1: canonToken1,
           sqrtPriceX96: slot0.sqrtPriceX96,
           tick: slot0.tick,
           liquidity: liq.liquidity,
           lpFee: slot0.lpFee,
           protocolFee: slot0.protocolFee,
+          fee: p.fee,
           tickSpacing: p.tickSpacing,
+          hooks: p.hooks || undefined,
           humanPrice,
           dec0: d0, dec1: d1,
           symbol0: sym0, symbol1: sym1,
@@ -388,6 +416,144 @@ export default function PushPrice() {
     })
   }
 
+  // 强制兑换：跳过 Quoter / target-price 估算，按用户给定的 amountIn 直接发 swap
+  async function onForceSwap() {
+    console.log('[forceSwap] click', { account, network, currentKind: current?.kind, forceTokenIn })
+    try { return await _onForceSwap() }
+    catch (e) {
+      console.error('[forceSwap] uncaught', e)
+      setForceErr(`未捕获异常：${e?.message || e}`)
+    }
+  }
+  async function _onForceSwap() {
+    setForceErr('')
+    if (!signerTronWeb || !account) { message.error('请先连接 TronLink 钱包'); return }
+    if (!swapEnabled) { message.error('当前网络缺 UNIVERSAL_ROUTER / PERMIT2 地址'); return }
+    try { assertWalletMatchesNetwork(signerTronWeb, network) }
+    catch (e) { setForceErr(e.message); message.error({ content: e.message, key: 'forceTx', duration: 8 }); return }
+    if (!current) { setForceErr('请先加载池子当前状态'); return }
+    if (!current.token0 || !current.token1) { setForceErr('未知 token —— V4 poolId 直输模式不支持 force swap'); return }
+    if (!forceTokenIn) { setForceErr('请选择 tokenIn'); return }
+    // 防止 dropdown value 与 current.token0/1 不匹配（脏状态、refetch 中途切换等）
+    if (forceTokenIn !== current.token0 && forceTokenIn !== current.token1) {
+      setForceErr(`tokenIn (${forceTokenIn}) 不在当前 pool token0/token1 中，请重新选择`); return
+    }
+
+    const isToken0In = forceTokenIn === current.token0
+    const tokenIn = isToken0In ? current.token0 : current.token1
+    const tokenOut = isToken0In ? current.token1 : current.token0
+    // 诊断日志：如有 No contract 报错可在 DevTools Console 直接看到调用上下文
+    console.log('[forceSwap] dispatch', {
+      kind: current.kind, network, isToken0In,
+      tokenIn, tokenOut, decIn: isToken0In ? current.dec0 : current.dec1,
+      poolAddress: current.poolAddress, poolId: current.poolId,
+      fee: current.fee, tickSpacing: current.tickSpacing,
+    })
+    const decIn = isToken0In ? current.dec0 : current.dec1
+    const decOut = isToken0In ? current.dec1 : current.dec0
+    if (decIn == null || decOut == null) { setForceErr('decimals 未加载完成'); return }
+
+    let amountInRaw, minOutRaw
+    try { amountInRaw = humanToRaw(forceAmountIn, decIn) }
+    catch (e) { setForceErr('amountIn 解析失败：' + (e.message || e)); return }
+    if (amountInRaw <= 0n) { setForceErr('amountIn 必须 > 0'); return }
+    try {
+      minOutRaw = (forceMinOut == null || forceMinOut.trim() === '')
+        ? 0n
+        : humanToRaw(forceMinOut, decOut)
+    } catch (e) { setForceErr('amountOutMin 解析失败：' + (e.message || e)); return }
+    if (minOutRaw < 0n) { setForceErr('amountOutMin 不能为负'); return }
+
+    const isV3 = current.kind === 'v3'
+    const tokenInIsNative = isNativeTrxAddress(tokenIn)
+    if (isV3 && tokenInIsNative) {
+      setForceErr('V3 池子不支持 native TRX 输入，请用 WTRX 包装代币'); return
+    }
+    if (!isV3) {
+      if (!current.fee || !current.tickSpacing) {
+        setForceErr('V4 池子需要 fee 与 tickSpacing'); return
+      }
+    } else if (current.fee == null) {
+      setForceErr('V3 fee 未加载'); return
+    }
+    const zeroForOne = isToken0In  // current.token0/token1 已是 canonical 顺序
+
+    Modal.confirm({
+      title: `确认 Force Swap (${isV3 ? 'V3' : 'V4'} UniversalRouter)`,
+      width: 620,
+      content: (
+        <div>
+          <p>tokenIn：<span className="value-mono">{tokenIn}</span>{tokenInIsNative ? <Tag color="gold" style={{ marginLeft: 8 }}>native TRX</Tag> : null}</p>
+          <p>tokenOut：<span className="value-mono">{tokenOut}</span></p>
+          <p>amountIn (raw)：<span className="value-mono">{amountInRaw.toString()}</span> <span style={{ color: '#888' }}>(human {forceAmountIn})</span></p>
+          <p>amountOutMin (raw)：<span className="value-mono">{minOutRaw.toString()}</span></p>
+          {isV3
+            ? <p>fee：<Tag>{current.fee}</Tag></p>
+            : <p>方向：{zeroForOne ? 'token0 → token1 (zeroForOne)' : 'token1 → token0 (oneForZero)'} · fee <Tag>{current.fee}</Tag> · tickSpacing <Tag>{current.tickSpacing}</Tag></p>}
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginTop: 12 }}
+            message="Force swap 跳过目标价校准"
+            description="amountIn 由用户直接给定，没有 sqrtPriceLimit 兜底，可能把价格推得很远或完全吃光当前流动性。amountOutMin 是唯一的成交价保护。"
+          />
+        </div>
+      ),
+      onOk: async () => {
+        let step = 'start'
+        try {
+          setForceLoading(true)
+          if (!tokenInIsNative) {
+            step = 'permit2-approvals'
+            console.log('[forceSwap] permit2 inputs', { account, tokenIn, amountInRaw: amountInRaw.toString() })
+            message.loading({ content: '检查并补齐 Permit2 授权...', key: 'forceTx' })
+            const approvals = await ensurePermit2Approvals(signerTronWeb, network, account, tokenIn, amountInRaw)
+            console.log('[forceSwap] permit2 result', approvals)
+            if (approvals.erc20Approve) console.log('ERC20→Permit2 approve tx:', approvals.erc20Approve)
+            if (approvals.permit2Approve) console.log('Permit2→Router approve tx:', approvals.permit2Approve)
+          }
+          step = isV3 ? 'v3-swap' : 'v4-swap'
+          message.loading({ content: `发送 ${isV3 ? 'V3' : 'V4'} UniversalRouter swap...`, key: 'forceTx' })
+          let txid
+          if (isV3) {
+            txid = await v3SwapExactInViaRouter(signerTronWeb, network, {
+              recipient: account,
+              tokenIn, tokenOut,
+              fee: current.fee,
+              amountIn: amountInRaw,
+              amountOutMin: minOutRaw,
+              payerIsUser: true,
+            })
+          } else {
+            const poolKey = {
+              currency0: current.token0,
+              currency1: current.token1,
+              fee: current.fee,
+              tickSpacing: current.tickSpacing,
+              hooks: current.hooks || undefined,
+            }
+            txid = await v4SwapExactInViaRouter(signerTronWeb, network, {
+              recipient: account,
+              poolKey,
+              zeroForOne,
+              amountIn: amountInRaw,
+              amountOutMin: minOutRaw,
+            })
+          }
+          message.success({ content: `Force swap 已广播: ${txid}`, key: 'forceTx', duration: 8 })
+          fetchCurrent(form)
+        } catch (e) {
+          console.error(`[forceSwap] step=${step} failed:`, e)
+          const msg = `[${step}] ${e?.message || String(e)}`
+          message.error({ content: msg, key: 'forceTx' })
+          setForceErr(msg)
+        } finally {
+          setForceLoading(false)
+        }
+      },
+    })
+  }
+
   const target = computeTargetSqrt()
   const targetHumanShown = target && dec0 != null && dec1 != null
     ? sqrtPriceX96ToHumanPrice(target, dec0, dec1).toSignificantDigits(18).toString()
@@ -545,6 +711,115 @@ export default function PushPrice() {
           </Card>
         </>
       )}
+
+      <Divider />
+      <Card title="⚡ 强制兑换 (跳过 Quoter / 目标价估算)" size="small" style={{ marginTop: 16 }}>
+        <p style={{ color: '#888', marginTop: 0 }}>
+          当 currentTick 处于 MIN/MAX 边界、Quoter 报错或目标价估算不可达时，
+          直接给定 amountIn 通过 UniversalRouter 发送 swap。<b>没有 sqrtPriceLimit 兜底</b>，
+          请用 amountOutMin 控制滑点。
+        </p>
+
+        {!current && <Alert type="info" showIcon message="请先在上方填写池子信息并加载当前状态" />}
+
+        {current && (!current.token0 || !current.token1) && (
+          <Alert
+            type="warning"
+            showIcon
+            message="V4 poolId 直输模式不支持 force swap"
+            description="切换到 tokens + fee + tickSpacing 模式重新填写后再使用本功能。"
+          />
+        )}
+
+        {current?.token0 && current?.token1 && (() => {
+          const isToken0In = forceTokenIn === current.token0
+          const decIn = forceTokenIn ? (isToken0In ? current.dec0 : current.dec1) : null
+          const decOut = forceTokenIn ? (isToken0In ? current.dec1 : current.dec0) : null
+          const symIn = forceTokenIn ? (isToken0In ? current.symbol0 : current.symbol1) : null
+          const symOut = forceTokenIn ? (isToken0In ? current.symbol1 : current.symbol0) : null
+          const noSlippage = !forceMinOut || forceMinOut.trim() === '' || forceMinOut.trim() === '0'
+          return (
+            <Form layout="vertical">
+              <Space size="large" wrap align="end">
+                <Form.Item label="tokenIn" style={{ marginBottom: 0 }}>
+                  <Select
+                    style={{ width: 360 }}
+                    value={forceTokenIn || undefined}
+                    onChange={setForceTokenIn}
+                    placeholder="选择输入 token"
+                    options={[
+                      { value: current.token0, label: `${current.symbol0 ?? '?'} (token0) — ${current.token0}` },
+                      { value: current.token1, label: `${current.symbol1 ?? '?'} (token1) — ${current.token1}` },
+                    ]}
+                  />
+                </Form.Item>
+                <Form.Item
+                  label={`amountIn ${symIn ? `(${symIn})` : ''} — dec=${decIn ?? '?'}`}
+                  style={{ marginBottom: 0 }}
+                >
+                  <Input
+                    style={{ width: 220 }}
+                    value={forceAmountIn}
+                    onChange={(e) => setForceAmountIn(e.target.value)}
+                    placeholder="human 数量，例如 100"
+                  />
+                </Form.Item>
+                <Form.Item
+                  label={`amountOutMin ${symOut ? `(${symOut})` : ''} — dec=${decOut ?? '?'}`}
+                  style={{ marginBottom: 0 }}
+                >
+                  <Input
+                    style={{ width: 220 }}
+                    value={forceMinOut}
+                    onChange={(e) => setForceMinOut(e.target.value)}
+                    placeholder="留空=0 (无保护)"
+                  />
+                </Form.Item>
+              </Space>
+
+              <div style={{ marginTop: 12 }}>
+                {forceTokenIn && isNativeTrxAddress(forceTokenIn) && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="native TRX：amountIn 将作为 callValue 注入，跳过 Permit2 授权"
+                  />
+                )}
+                {forceTokenIn && current.kind === 'v3' && isNativeTrxAddress(forceTokenIn) && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="V3 池子不支持 native TRX，请用 WTRX 包装代币"
+                  />
+                )}
+                {forceTokenIn && forceAmountIn && noSlippage && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="amountOutMin = 0 — 没有滑点保护"
+                    description="任何成交价都会被接受，存在 MEV / 池子薄被夹的风险。生产环境请填写一个合理的最小输出。"
+                  />
+                )}
+              </div>
+
+              <Button
+                type="primary"
+                danger
+                onClick={onForceSwap}
+                disabled={!swapEnabled || !account || !forceTokenIn || !forceAmountIn || forceLoading}
+                loading={forceLoading}
+              >
+                强制执行 {current.kind.toUpperCase()} swap (UniversalRouter)
+              </Button>
+
+              {forceErr && <Alert style={{ marginTop: 12 }} type="error" message={forceErr} showIcon />}
+            </Form>
+          )
+        })()}
+      </Card>
     </div>
   )
 }

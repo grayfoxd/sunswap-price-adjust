@@ -2,9 +2,29 @@
 // 并按 ABI outputs 自动解析返回值
 
 import { readTronWeb } from './tronweb.js'
+import { getNetwork } from '../config/networks.js'
 import { findFn, functionSelector, toTronParam } from './abi.js'
 import { parseConstantResult } from './parseResult.js'
 import { throttle } from './throttle.js'
+
+// 抽出 host 主机名做对比（忽略协议/端口/路径），用来检测钱包注入的 tronWeb 与 App 选择的网络是否一致
+function hostOf(url) {
+  try { return new URL(url).host.toLowerCase() } catch { return '' }
+}
+// 钱包网络一致性校验：TronLink 切换网络后不刷新页面时，window.tronWeb 仍指向旧 RPC，
+// 会导致 triggerSmartContract 抛 "No contract or not a valid smart contract"
+export function assertWalletMatchesNetwork(signerTronWeb, networkKey) {
+  if (!signerTronWeb?.fullNode?.host) return
+  const walletHost = hostOf(signerTronWeb.fullNode.host)
+  const appHost = hostOf(getNetwork(networkKey).rpc)
+  if (!walletHost || !appHost) return
+  if (walletHost !== appHost) {
+    throw new Error(
+      `钱包网络与 App 不一致：TronLink 当前 RPC=${walletHost}，App 选的是 ${networkKey} (${appHost})。` +
+      `请在 TronLink 扩展里切到对应网络后刷新本页面 (F5)。`,
+    )
+  }
+}
 
 // 只读调用
 // args: 与 ABI inputs 顺序匹配的 JS 值数组
@@ -41,7 +61,9 @@ export async function callRead(networkKey, contractAddress, abi, fnName, args = 
 
 // 写调用（通过钱包签名）
 // signerTronWeb: window.tronWeb（已连接的 TronLink 实例）
+// options.networkKey: 如果传入，会校验钱包当前 RPC 是否与该网络一致（防止切网后未刷新）
 export async function callWrite(signerTronWeb, contractAddress, abi, fnName, args = [], options = {}) {
+  if (options.networkKey) assertWalletMatchesNetwork(signerTronWeb, options.networkKey)
   const fn = findFn(abi, fnName)
   const selector = functionSelector(fn)
   const parameters = (fn.inputs || []).map((inp, i) => toTronParam(inp.type, args[i], inp.components))
