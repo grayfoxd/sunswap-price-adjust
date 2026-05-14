@@ -42,11 +42,12 @@ UI 仅支持 **TronLink** 浏览器扩展。读链路独立于钱包（自建 Tr
 
 ## 部署
 
-`npm run build` 输出的 `dist/` 是纯静态资源，可直接部署到：
+`npm run build` 输出的 `dist/` 是纯静态资源。**完整部署指引见 [部署.md](./部署.md)**（Vercel 零配置 / GitHub Pages + Actions / 环境变量 / 选型对比）。
 
-- Vercel / Netlify（推荐，自动 SPA fallback）
-- GitHub Pages
-- IPFS（`vite.config.js` 中 `base: './'` 已配置）
+简版：
+- **Vercel**：连 GitHub → Import → Deploy，零配置，BrowserRouter 直接可用（推荐）
+- **GitHub Pages**：改 `src/main.jsx` 用 `HashRouter`，加 `.github/workflows/deploy.yml`
+- **IPFS / 自建 CDN**：`vite.config.js` 中 `base: './'` 已配置
 
 ## 代码组织
 
