@@ -3,10 +3,11 @@
 // V4：本地估算 + Quoter 给参考（实际 swap 执行涉及 UniversalRouter+Permit2，标"预览模式"）
 
 import React, { useEffect, useRef, useState } from 'react'
-import { Alert, Button, Card, Descriptions, Divider, Form, Input, message, Space, Tag, Modal, InputNumber, Select } from 'antd'
+import { Alert, Button, Card, Descriptions, Divider, Form, Input, message, Space, Tag, Modal, Select } from 'antd'
 import Decimal from 'decimal.js'
 import PoolSelector from '../components/PoolSelector.jsx'
 import PoolStateCard from '../components/PoolStateCard.jsx'
+import AddLiquidityCard from '../components/AddLiquidityCard.jsx'
 import { useStore } from '../state/store'
 import { humanPriceToSqrtPriceX96, sqrtPriceX96ToHumanPrice } from '../math/sqrtPrice'
 import { planV3PushPrice, planV4PushPrice } from '../services/pushPrice'
@@ -70,7 +71,7 @@ export default function PushPrice() {
   const [currentErr, setCurrentErr] = useState('')
   const [loading, setLoading] = useState(false)
   const [plan, setPlan] = useState(null)
-  const [slippageBps, setSlippageBps] = useState(100)
+  const [slippageBps, setSlippageBps] = useState(500)
   const [err, setErr] = useState('')
 
   // 强制兑换 (force swap) —— 用于 currentTick 在 MIN/MAX 边界或目标价估算失败的场景
@@ -612,9 +613,6 @@ export default function PushPrice() {
                 <Input className="value-mono" value={targetSqrt} onChange={(e) => setTargetSqrt(e.target.value)} placeholder={current?.sqrtPriceX96 ? `当前 ${current.sqrtPriceX96}` : '例如 4768605873228743255922197'} />
               </Form.Item>
             )}
-            <Form.Item label="滑点 (bps)">
-              <InputNumber min={0} max={5000} value={slippageBps} onChange={(v) => setSlippageBps(Number(v) || 0)} />
-            </Form.Item>
           </Space>
 
           {target && (
@@ -820,6 +818,14 @@ export default function PushPrice() {
           )
         })()}
       </Card>
+
+      <AddLiquidityCard
+        current={current}
+        account={account}
+        signerTronWeb={signerTronWeb}
+        network={network}
+        onAfterMint={() => fetchCurrent(form)}
+      />
     </div>
   )
 }

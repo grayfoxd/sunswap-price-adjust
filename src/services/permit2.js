@@ -44,47 +44,58 @@ export async function approveErc20ToPermit2(signerTronWeb, networkKey, tokenBase
   ])
 }
 
-// Permit2.allowance(owner, token, UniversalRouter) → { amount, expiration, nonce }
-export async function getPermit2AllowanceForRouter(networkKey, ownerBase58, tokenBase58) {
+// Permit2.allowance(owner, token, spender) → { amount, expiration, nonce }
+export async function getPermit2AllowanceForSpender(networkKey, ownerBase58, tokenBase58, spenderBase58) {
   const permit2 = getPermit2Addr(networkKey)
-  const router = getUniversalRouterAddr(networkKey)
   return callRead(networkKey, permit2, permit2Abi, 'allowance', [
     toEvmHex(ownerBase58, networkKey),
     toEvmHex(tokenBase58, networkKey),
-    toEvmHex(router, networkKey),
+    toEvmHex(spenderBase58, networkKey),
   ])
 }
 
-// Permit2.approve(token, UniversalRouter, amount, expiration)
-export async function approveRouterViaPermit2(
+// 兼容旧调用：默认 spender = UniversalRouter
+export async function getPermit2AllowanceForRouter(networkKey, ownerBase58, tokenBase58) {
+  return getPermit2AllowanceForSpender(networkKey, ownerBase58, tokenBase58, getUniversalRouterAddr(networkKey))
+}
+
+// Permit2.approve(token, spender, amount, expiration)
+export async function approveSpenderViaPermit2(
   signerTronWeb,
   networkKey,
   tokenBase58,
+  spenderBase58,
   amount = MAX_UINT160,
   expirationSec,
 ) {
   const permit2 = getPermit2Addr(networkKey)
-  const router = getUniversalRouterAddr(networkKey)
   const exp = expirationSec ?? Math.floor(Date.now() / 1000) + DEFAULT_EXPIRATION_SECONDS
   return callWrite(signerTronWeb, permit2, permit2Abi, 'approve', [
     toEvmHex(tokenBase58, networkKey),
-    toEvmHex(router, networkKey),
+    toEvmHex(spenderBase58, networkKey),
     amount.toString(),
     exp.toString(),
   ])
 }
 
+// 兼容旧调用：spender = UniversalRouter
+export async function approveRouterViaPermit2(signerTronWeb, networkKey, tokenBase58, amount = MAX_UINT160, expirationSec) {
+  return approveSpenderViaPermit2(signerTronWeb, networkKey, tokenBase58, getUniversalRouterAddr(networkKey), amount, expirationSec)
+}
+
 // 一次性 ensure：自动补齐两步授权（只有缺失或不够才发送交易）
-export async function ensurePermit2Approvals(signerTronWeb, networkKey, ownerBase58, tokenBase58, amount) {
+// 默认 spender = UniversalRouter；可显式指定 spender（如 PositionManager）
+export async function ensurePermit2Approvals(signerTronWeb, networkKey, ownerBase58, tokenBase58, amount, spenderBase58) {
+  const spender = spenderBase58 || getUniversalRouterAddr(networkKey)
   const txs = { erc20Approve: null, permit2Approve: null }
   const erc20Allow = await getErc20AllowanceToPermit2(networkKey, ownerBase58, tokenBase58)
   if (erc20Allow < amount) {
     txs.erc20Approve = await approveErc20ToPermit2(signerTronWeb, networkKey, tokenBase58)
   }
-  const p2Allow = await getPermit2AllowanceForRouter(networkKey, ownerBase58, tokenBase58)
+  const p2Allow = await getPermit2AllowanceForSpender(networkKey, ownerBase58, tokenBase58, spender)
   const nowSec = BigInt(Math.floor(Date.now() / 1000))
   if (p2Allow.amount < amount || p2Allow.expiration < nowSec) {
-    txs.permit2Approve = await approveRouterViaPermit2(signerTronWeb, networkKey, tokenBase58)
+    txs.permit2Approve = await approveSpenderViaPermit2(signerTronWeb, networkKey, tokenBase58, spender)
   }
   return txs
 }
