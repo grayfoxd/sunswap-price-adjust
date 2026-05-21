@@ -6,3 +6,8 @@ dist
 *.log
 .vite
 sunio-dev-node-keypair.pem
+
+# 本地部署脚本（含生产 IP / SSH key 路径，仅本机使用）
+deploy.sh
+setup-nginx.sh
+nginx-snippet.conf
